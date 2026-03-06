@@ -1,159 +1,152 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import io
+from PIL import Image
 
-# --- 1. PAGE CONFIG ---
-st.set_page_config(
-    page_title="TotalPower FIP Manager", 
-    page_icon="🏦", 
-    layout="wide"
-)
+st.set_page_config(page_title="FIP Recon Tool V24", layout="wide")
 
-# Minimal CSS to style the metrics and layout without breaking theme colors
-st.markdown("""
-    <style>
-    /* Professional styling for the metric boxes */
-    [data-testid="stMetric"] {
-        background-color: rgba(255, 255, 255, 0.05);
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid rgba(128, 128, 128, 0.2);
-    }
+# --- BRANDING & LOGO SECTION ---
+try:
+    # Using the BECU logo as requested
+    logo_img = Image.open('becu_logo.png')
+    col1, col2 = st.columns([1, 8])
+    with col1:
+        st.image(logo_img, width=100)
+    with col2:
+        st.title("FIP Recon Tool V24")
+        st.caption("Family Indemnity Plan Monthly Reconciliation")
+except FileNotFoundError:
+    st.title("FIP Recon Tool V24")
+    st.info("Note: Place 'becu_logo.png' in the folder to display the logo.")
+
+st.divider()
+
+# --- CORE FUNCTIONS ---
+def header_hunter(file):
+    if file.name.endswith('.csv'):
+        df_raw = pd.read_csv(file, header=None)
+    else:
+        df_raw = pd.read_excel(file, header=None)
     
-    /* Ensure the main area has a slight distinction from the background */
-    .block-container {
-        padding-top: 2rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- HELPER FUNCTIONS ---
-def clean_acno(series):
-    return pd.to_numeric(series, errors='coerce').fillna(0).astype(int)
-
-def find_header_and_read(file, target_keywords):
-    file.seek(0)
-    content = file.getvalue().decode('utf-8', errors='ignore').splitlines()
-    header_row = 0
-    for i, line in enumerate(content[:25]):
-        if any(key.lower() in line.lower() for key in target_keywords):
-            header_row = i
+    header_row_index = 0
+    for i, row in df_raw.iterrows():
+        vals = [str(v).strip().lower() for v in row.values]
+        if any(keyword in vals for keyword in ['acno', 'name', 'acct_nr', 'cert_num']):
+            header_row_index = i
             break
-    file.seek(0)
-    df = pd.read_csv(file, header=header_row)
+            
+    df = df_raw.iloc[header_row_index:].copy()
+    new_cols = []
+    for col in df.iloc[0]:
+        val = str(col).strip()
+        if val == 'nan' or val == '':
+            new_cols.append("Extra_Name_Field")
+        else:
+            new_cols.append(val)
+    df.columns = new_cols
+    df = df[1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
+    
+    df = df[df.iloc[:, 0].astype(str).str.len() > 0]
+    plan_col = next((c for c in df.columns if 'plan' in c.lower()), None)
+    if plan_col:
+        df = df[df[plan_col].astype(str).str.contains("Plan", case=False, na=False)]
+    
+    cols = pd.Series(df.columns)
+    for dup in cols[cols.duplicated()].unique(): 
+        cols[cols == dup] = [f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+    df.columns = cols
     return df
 
-# --- 2. SIDEBAR (Standard Theme Mode) ---
-with st.sidebar:
+FIP_AMOUNTS = [52.80, 63.40, 79.20, 79.30, 95.10, 105.60, 126.80, 158.40, 190.20, 198.30, 253.60, 261.70, 323.60, 325.10, 380.40, 396.60, 412.10, 472.90, 528.00, 555.10, 634.00, 826.00]
+
+# --- FILE UPLOADS ---
+u1, u2 = st.columns(2)
+with u1:
+    act_file = st.file_uploader("📂 Activity Report (CUMME)", type=['csv', 'xlsx', 'xls'])
+with u2:
+    cuna_file = st.file_uploader("📂 CUNA Billing File", type=['csv', 'xlsx', 'xls'])
+
+if act_file and cuna_file:
     try:
-        st.image("logo.png", width=200)
-    except:
-        st.title("🏢 TOTAL POWER")
-    
-    st.markdown("---")
-    st.header("📂 1. Setup Data")
-    master_file = st.file_uploader("Upload Master List CSV", type=['csv'])
-    
-    st.markdown("---")
-    st.header("💰 2. Management Controls")
-    opening_bal = st.number_input("Opening Balance ($)", value=0.0, step=100.0)
-    top_x_count = st.number_input("Show Top 'X' Delinquents", value=20, step=5)
-    
-    st.markdown("---")
-    st.caption("🔒 **Security Note:** Data is processed in-memory and is not stored on the server.")
+        df_act = header_hunter(act_file)
+        df_cuna = header_hunter(cuna_file)
 
-# --- 3. MAIN PAGE HEADER ---
-col_h1, col_h2 = st.columns([3, 1])
-with col_h1:
-    st.title("🏦 FIP Management Dashboard")
-    st.markdown("### Member Reconciliation & Financial Audit Portal")
-with col_h2:
-    st.write(f"**Run Date:** {datetime.now().strftime('%d %b %Y')}")
-    st.write(f"**Status:** 🟢 System Active")
-
-if not master_file:
-    st.info("👋 Welcome! Please upload the Master List in the sidebar to begin.")
-    st.stop()
-
-try:
-    df_master = find_header_and_read(master_file, ['AcNo', 'Name'])
-    df_master['Match_ID'] = clean_acno(df_master['AcNo'])
-except Exception as e:
-    st.error(f"Error loading Master List: {e}")
-    st.stop()
-
-# --- 4. FILE UPLOADS ---
-st.markdown("---")
-st.subheader("📁 Upload Monthly Files")
-col_u1, col_u2 = st.columns(2)
-with col_u1:
-    cuna_file = st.file_uploader("Upload CUNA (Billing File)", type=['csv'])
-with col_u2:
-    pmts_file = st.file_uploader("Upload PMTS (Payment File)", type=['csv'])
-
-if cuna_file and pmts_file:
-    try:
-        df_cuna = find_header_and_read(cuna_file, ['ACCT_NR', 'PREM'])
-        acct_col = [c for c in df_cuna.columns if 'ACCT' in c.upper() or 'ACCT_NR' in c.upper()][0]
-        prem_col = [c for c in df_cuna.columns if 'PREM' in c.upper()][0]
-        df_cuna['Match_ID'] = clean_acno(df_cuna[acct_col])
-        df_cuna['Amount'] = pd.to_numeric(df_cuna[prem_col], errors='coerce').fillna(0)
-        bill_totals = df_cuna.groupby('Match_ID')['Amount'].sum().reset_index(name='Billed')
-
-        df_pmts = find_header_and_read(pmts_file, ['AcNo', 'Cr Amt'])
-        df_pmts['Match_ID'] = clean_acno(df_pmts['AcNo'])
-        cr_cols = [c for c in df_pmts.columns if "Cr Amt" in str(c)]
-        df_pmts['Total_Pay'] = df_pmts[cr_cols].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
-        pay_totals = df_pmts.groupby('Match_ID')['Total_Pay'].sum().reset_index(name='Paid')
-
-        report = df_master[['AcNo', 'Name', 'Match_ID']].copy()
-        report = report.merge(bill_totals, on='Match_ID', how='left').fillna(0)
-        report = report.merge(pay_totals, on='Match_ID', how='left').fillna(0)
-        report['Difference'] = (report['Paid'] - report['Billed']).round(2)
+        # Name Logic (NaN-Shield for cross-month compatibility)
+        name_main = next((c for c in df_act.columns if 'name' in c.lower() and 'extra' not in c.lower()), df_act.columns[1])
+        name_extra = next((c for c in df_act.columns if 'extra_name_field' in c.lower()), None)
         
-        underpaid_all = report[report['Difference'] < -0.01].sort_values(by='Difference')
-        overpaid_all = report[report['Difference'] > 0.01].sort_values(by='Difference', ascending=False)
-        top_x_df = underpaid_all.head(int(top_x_count))
+        if name_extra:
+            df_act['Full_Name'] = df_act[name_main].astype(str) + " " + \
+                                  df_act[name_extra].astype(str).replace('nan', '')
+            df_act['Full_Name'] = df_act['Full_Name'].str.strip()
+        else:
+            df_act['Full_Name'] = df_act[name_main]
 
-        total_billed = report['Billed'].sum()
-        total_paid = report['Paid'].sum()
-        closing_bal = (opening_bal + total_paid) - total_billed
+        ac_col = next((c for c in df_act.columns if 'acno' in c.lower() or 'acct_nr' in c.lower()), df_act.columns[0])
+        best_act_col = next((c for c in df_act.columns if pd.to_numeric(df_act[c], errors='coerce').isin(FIP_AMOUNTS).any()), df_act.columns[-1])
+        cuna_prem_col = next((c for c in df_cuna.columns if 'curr' in c.lower() and 'prem' in c.lower()), df_cuna.columns[13])
 
-        st.markdown("---")
-        st.subheader("📊 Financial Summary")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Opening Balance", f"${opening_bal:,.2f}")
-        m2.metric("Total Collected", f"${total_paid:,.2f}")
-        m3.metric("Total Billed", f"-${total_billed:,.2f}", delta_color="inverse")
-        m4.metric("Estimated Closing", f"${closing_bal:,.2f}")
+        if st.button("🚀 Process Reports"):
+            df_act['Numeric_Amt'] = pd.to_numeric(df_act[best_act_col], errors='coerce').fillna(0)
+            df_fip = df_act[df_act['Numeric_Amt'].isin(FIP_AMOUNTS)].copy()
+            df_fip['Join_ID'] = df_fip[ac_col].astype(str).str.split('.').str[0].str.lstrip('0')
 
-        if not top_x_df.empty:
-            st.markdown("---")
-            st.subheader(f"⚠️ Top {int(top_x_count)} Delinquent Accounts")
-            chart_data = top_x_df.set_index('Name')['Difference'].abs()
-            st.bar_chart(chart_data)
+            df_cuna['CUNA_Amt'] = pd.to_numeric(df_cuna[cuna_prem_col], errors='coerce').fillna(0)
+            cuna_id_col = next(c for c in df_cuna.columns if 'acct_nr' in str(c).lower())
+            cert_col = next(c for c in df_cuna.columns if 'cert_num' in str(c).lower())
+            df_cuna['Join_ID'] = df_cuna[cuna_id_col].astype(str).str.split('.').str[0].str.lstrip('0')
 
-        st.markdown("---")
-        st.subheader("🔍 Member Detailed Lookup")
-        search_query = st.text_input("Search by Name or Account Number", "")
-        display_df = report.copy()
-        if search_query:
-            display_df = display_df[
-                (display_df['Name'].str.contains(search_query, case=False, na=False)) |
-                (display_df['AcNo'].astype(str).str.contains(search_query))
-            ]
-        st.dataframe(display_df[['AcNo', 'Name', 'Billed', 'Paid', 'Difference']], use_container_width=True)
+            total_collected = df_fip['Numeric_Amt'].sum()
+            total_billed = df_cuna['CUNA_Amt'].sum()
 
-        st.markdown("---")
-        st.subheader("📥 Export Final Reports")
-        d1, d2, d3 = st.columns(3)
-        d1.download_button(label="🔴 Underpaid List", data=underpaid_all.to_csv(index=False), file_name="Underpaid.csv", use_container_width=True)
-        d2.download_button(label="🟢 Overpaid List", data=overpaid_all.to_csv(index=False), file_name="Overpaid.csv", use_container_width=True)
-        d3.download_button(label="📄 Full Audit Report", data=report.to_csv(index=False), file_name="Full_Audit.csv", use_container_width=True)
+            st.subheader("📊 Financial Dashboard (Current Month)")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("BECU Collected", f"${total_collected:,.2f}")
+            m2.metric("CUNA Billed", f"${total_billed:,.2f}")
+            m3.metric("Net Variance", f"${total_collected - total_billed:,.2f}")
+            m4.metric("Total Matches", len(df_fip))
+
+            merged = pd.merge(df_fip, df_cuna[['Join_ID', cert_col, 'PLAN']], on='Join_ID', how='left')
+            ghosts = df_cuna[~df_cuna['Join_ID'].isin(df_fip['Join_ID'])].copy()
+            mismatches = merged[merged[cert_col].isna()]
+
+            full_report = pd.DataFrame()
+            full_report['ACCT_NR'] = merged[ac_col]; full_report['NAME'] = merged['Full_Name']
+            full_report['PLAN'] = merged['PLAN']; full_report['PREMIUM_AMT'] = merged['Numeric_Amt']
+            full_report['CERT_NUM'] = merged[cert_col]
+            cleaned_report = full_report[full_report['CERT_NUM'].notna()].copy()
+
+            tab1, tab2, tab3 = st.tabs(["📄 Export & Preview", "🔍 Queries (Mismatches)", "⚠️ Uncollected Premiums"])
+            
+            with tab1:
+                st.write("### Data Preview (Full List)")
+                st.dataframe(full_report, use_container_width=True)
+                st.divider()
+                st.write("### Download Options")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.info(f"**Internal Report**\n{len(full_report)} records")
+                    out_full = io.BytesIO()
+                    with pd.ExcelWriter(out_full, engine='openpyxl') as writer: full_report.to_excel(writer, index=False)
+                    st.download_button("📥 Download Full Report", data=out_full.getvalue(), file_name="Full_FIP_Report.xlsx")
+                with col_b:
+                    st.success(f"**CUNA Upload**\n{len(cleaned_report)} records")
+                    out_clean = io.BytesIO()
+                    with pd.ExcelWriter(out_clean, engine='openpyxl') as writer: cleaned_report.to_excel(writer, index=False)
+                    st.download_button("📥 Download Cleaned Upload", data=out_clean.getvalue(), file_name="CUNA_Portal_Upload.xlsx")
+
+            with tab2:
+                st.warning(f"Found {len(mismatches)} members paying premiums missing from CUNA Bill.")
+                st.dataframe(mismatches[[ac_col, 'Full_Name', 'Numeric_Amt']], use_container_width=True)
+
+            with tab3:
+                st.error(f"Found {len(ghosts)} members billed by CUNA where no payment was found.")
+                st.dataframe(ghosts[[cuna_id_col, 'CERT_HOLDER_FNAME', 'CERT_HOLDER_LNAME', 'CUNA_Amt']], use_container_width=True)
 
     except Exception as e:
-        st.error(f"Processing Error: {e}")
+        st.error(f"Error processing reports: {e}")
 
+# --- FOOTER ---
 st.markdown("---")
-st.markdown("<p style='text-align: center; color: grey;'>Total Power Ltd - Internal Reconciliation System</p>", unsafe_allow_html=True)
+st.caption("FIP Reconciliation Tool - Version 24")

@@ -23,7 +23,6 @@ st.divider()
 # --- CORE FUNCTIONS ---
 def header_hunter(file):
     if file.name.endswith('.csv'):
-        # Added encoding safety for GitHub/Linux environments
         try:
             df_raw = pd.read_csv(file, header=None, encoding='utf-8')
         except UnicodeDecodeError:
@@ -32,7 +31,7 @@ def header_hunter(file):
         df_raw = pd.read_excel(file, header=None)
     
     header_row_index = 0
-    for i, row in df_raw.head(50).iterrows(): # Scans top 50 rows for safety
+    for i, row in df_raw.head(50).iterrows():
         vals = [str(v).strip().lower() for v in row.values]
         if any(keyword in vals for keyword in ['acno', 'name', 'acct_nr', 'cert_num']):
             header_row_index = i
@@ -42,7 +41,6 @@ def header_hunter(file):
     new_cols = []
     for i, col in enumerate(df.iloc[0]):
         val = str(col).strip()
-        # GitHub/Linux fix: check for more types of empty headers
         if val.lower() in ['nan', '', 'none', 'unnamed:']:
             new_cols.append(f"Extra_Field_{i}")
         else:
@@ -52,7 +50,6 @@ def header_hunter(file):
     df = df[1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Filter out empty rows
     df = df[df.iloc[:, 0].astype(str).str.len() > 0]
     
     plan_col = next((c for c in df.columns if 'plan' in c.lower()), None)
@@ -79,25 +76,21 @@ if act_file and cuna_file:
         df_act = header_hunter(act_file)
         df_cuna = header_hunter(cuna_file)
 
-        # Name Logic (Optimized for BECU/CUNA column structures)
-        # Look for the primary name column
-        name_main = next((c for c in df_act.columns if 'name' in c.lower() and 'extra' not in c.lower() and 'field' not in c.lower()), None)
-        if not name_main:
-            name_main = df_act.columns[1] # Fallback to second column
+        # 1. CUNA Name Logic: Combine FNAME and LNAME from CUNA file
+        fname_col = next((c for c in df_cuna.columns if 'fname' in c.lower()), None)
+        lname_col = next((c for c in df_cuna.columns if 'lname' in c.lower()), None)
 
-        # Look for the split name column (the "Extra" field)
-        name_extra = next((c for c in df_act.columns if 'extra_field' in c.lower() or 'extra_name' in c.lower()), None)
-        
-        if name_extra:
-            df_act['Full_Name'] = df_act[name_main].astype(str).replace('nan', '') + " " + \
-                                  df_act[name_extra].astype(str).replace('nan', '')
-            df_act['Full_Name'] = df_act['Full_Name'].str.strip()
+        if fname_col and lname_col:
+            df_cuna['CUNA_Name'] = df_cuna[fname_col].astype(str) + " " + df_cuna[lname_col].astype(str)
+            df_cuna['CUNA_Name'] = df_cuna['CUNA_Name'].str.upper().replace('NAN', '').str.strip()
         else:
-            df_act['Full_Name'] = df_act[name_main].astype(str).replace('nan', 'Unknown')
+            # Fallback to any column in CUNA that has "name" in it
+            alt_name = next((c for c in df_cuna.columns if 'name' in c.lower()), df_cuna.columns[1])
+            df_cuna['CUNA_Name'] = df_cuna[alt_name].astype(str).str.upper()
 
         ac_col = next((c for c in df_act.columns if 'acno' in c.lower() or 'acct_nr' in c.lower()), df_act.columns[0])
         
-        # Locate the premium column by checking against the FIP_AMOUNTS list
+        # Locate the premium column in Activity
         best_act_col = None
         for c in df_act.columns:
             if pd.to_numeric(df_act[c], errors='coerce').isin(FIP_AMOUNTS).any():
@@ -121,20 +114,22 @@ if act_file and cuna_file:
             total_collected = df_fip['Numeric_Amt'].sum()
             total_billed = df_cuna['CUNA_Amt'].sum()
 
-            st.subheader("📊 Financial Dashboard (Current Month)")
+            st.subheader("📊 Financial Dashboard")
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("BECU Collected", f"${total_collected:,.2f}")
             m2.metric("CUNA Billed", f"${total_billed:,.2f}")
             m3.metric("Net Variance", f"${total_collected - total_billed:,.2f}")
             m4.metric("Total Matches", len(df_fip))
 
-            merged = pd.merge(df_fip, df_cuna[['Join_ID', cert_col, 'PLAN']], on='Join_ID', how='left')
+            # --- THE FIX: Merge CUNA_Name into the final results ---
+            merged = pd.merge(df_fip, df_cuna[['Join_ID', cert_col, 'PLAN', 'CUNA_Name']], on='Join_ID', how='left')
             ghosts = df_cuna[~df_cuna['Join_ID'].isin(df_fip['Join_ID'])].copy()
             mismatches = merged[merged[cert_col].isna()]
 
             full_report = pd.DataFrame()
             full_report['ACCT_NR'] = merged[ac_col]
-            full_report['NAME'] = merged['Full_Name']
+            # Use CUNA_Name here instead of the Activity list name
+            full_report['NAME'] = merged['CUNA_Name'].fillna("NOT IN CUNA BILL")
             full_report['PLAN'] = merged['PLAN']
             full_report['PREMIUM_AMT'] = merged['Numeric_Amt']
             full_report['CERT_NUM'] = merged[cert_col]
@@ -143,37 +138,31 @@ if act_file and cuna_file:
             tab1, tab2, tab3 = st.tabs(["📄 Export & Preview", "🔍 Queries (Mismatches)", "⚠️ Uncollected Premiums"])
             
             with tab1:
-                st.write("### Data Preview (Full List)")
+                st.write("### Data Preview")
                 st.dataframe(full_report, use_container_width=True)
                 st.divider()
-                st.write("### Download Options")
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    st.info(f"**Internal Report**\n{len(full_report)} records")
                     out_full = io.BytesIO()
                     with pd.ExcelWriter(out_full, engine='openpyxl') as writer: 
                         full_report.to_excel(writer, index=False)
                     st.download_button("📥 Download Full Report", data=out_full.getvalue(), file_name="Full_FIP_Report.xlsx")
                 with col_b:
-                    st.success(f"**CUNA Upload**\n{len(cleaned_report)} records")
                     out_clean = io.BytesIO()
                     with pd.ExcelWriter(out_clean, engine='openpyxl') as writer: 
                         cleaned_report.to_excel(writer, index=False)
                     st.download_button("📥 Download Cleaned Upload", data=out_clean.getvalue(), file_name="CUNA_Portal_Upload.xlsx")
 
             with tab2:
-                st.warning(f"Found {len(mismatches)} members paying premiums missing from CUNA Bill.")
-                st.dataframe(mismatches[[ac_col, 'Full_Name', 'Numeric_Amt']], use_container_width=True)
+                st.warning(f"Found {len(mismatches)} members missing from CUNA Bill.")
+                st.dataframe(mismatches[[ac_col, 'Numeric_Amt']], use_container_width=True)
 
             with tab3:
-                st.error(f"Found {len(ghosts)} members billed by CUNA where no payment was found.")
-                # Fallback for CUNA names if specific columns are missing
-                cuna_name_cols = [c for c in ghosts.columns if 'name' in c.lower()]
-                st.dataframe(ghosts[cuna_name_cols + ['CUNA_Amt']], use_container_width=True)
+                st.error(f"Found {len(ghosts)} members with no payment found.")
+                st.dataframe(ghosts[['Join_ID', 'CUNA_Name', 'CUNA_Amt']], use_container_width=True)
 
     except Exception as e:
         st.error(f"Error processing reports: {e}")
 
-# --- FOOTER ---
 st.markdown("---")
-st.caption("FIP Reconciliation Tool - Version 24.1")
+st.caption("FIP Reconciliation Tool - Version 24.1 (CUNA Name Priority)")

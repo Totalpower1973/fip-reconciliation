@@ -91,7 +91,7 @@ if act_file and cuna_file:
         cuna_prem_col = next((c for c in df_cuna.columns if 'curr' in c.lower() and 'prem' in c.lower()), df_cuna.columns[-1])
         prod_col = next((c for c in df_cuna.columns if 'product' in c.lower()), None)
 
-        if st.button("🚀 Run Ultimate Reconciliation"):
+        if st.button("🚀 Run Reconciliation"):
             # Payments Logic (Activity)
             df_act['Numeric_Amt'] = pd.to_numeric(df_act[best_act_col], errors='coerce').fillna(0)
             df_fip_payments = df_act[df_act['Numeric_Amt'].isin(list(FIP_AMOUNTS))].copy()
@@ -129,7 +129,7 @@ if act_file and cuna_file:
             with tab1:
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    st.info("Full Side-by-Side Audit (Includes Martha/Nancy and all Non-FIP)")
+                    st.info("Full Side-by-Side Audit")
                     audit_out = merged.copy()
                     audit_out.rename(columns={'Numeric_Amt': 'BECU_PAID', cuna_prem_col: 'CUNA_BILLED'}, inplace=True)
                     out_audit = io.BytesIO()

@@ -32,6 +32,7 @@ def load_generic_file(file):
 def header_hunter(file):
     raw = load_generic_file(file)
     header_row_index = 0
+    # Scan for common headers to identify the start of data
     for i, row in raw.head(50).iterrows():
         vals = [str(v).strip().lower() for v in row.values]
         if any(keyword in vals for keyword in ['acno', 'name', 'acct_nr', 'cert_num']):
@@ -50,6 +51,7 @@ def header_hunter(file):
     df.columns = new_cols
     df = df[1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
+    # Filter out empty rows at the bottom
     df = df[df.iloc[:, 0].astype(str).str.len() > 0]
     
     cols = pd.Series(df.columns)
@@ -109,16 +111,13 @@ if act_file and cuna_file:
             merged['Numeric_Amt'] = merged['Numeric_Amt'].fillna(0)
 
             # --- DISCREPANCY DATASETS ---
-            # Queries: People who paid but are NOT on the CUNA Bill
             df_queries = df_fip_summary[~df_fip_summary['Join_ID'].isin(df_cuna_clean['Join_ID'])].copy()
-            
-            # Uncollected: People on the CUNA Bill who paid $0.00
             df_uncollected = merged[merged['Numeric_Amt'] == 0].copy()
 
             # --- UI DASHBOARD ---
             st.subheader("📊 Reconciliation Overview")
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("CUNA Master List", len(merged))
+            m1.metric("CUNA Billed Total", f"${pd.to_numeric(df_cuna_clean[cuna_prem_col], errors='coerce').sum():,.2f}")
             m2.metric("Total Collected", f"${merged['Numeric_Amt'].sum():,.2f}")
             m3.metric("Queries (Investigate)", len(df_queries))
             m4.metric("Uncollected (0.00)", len(df_uncollected))
@@ -160,4 +159,4 @@ if act_file and cuna_file:
         st.error(f"Error: {e}")
 
 st.markdown("---")
-st.caption("FIP Reconciliation Tool - Version 24.36 (Ultimate Master-Audit Edition)")
+st.caption("FIP Reconciliation Tool - Version 24.37 (Complete Dashboard Edition)")

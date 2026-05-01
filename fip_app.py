@@ -13,7 +13,7 @@ try:
         st.image(logo_img, width=100)
     with col2:
         st.title("FIP Recon Tool V24")
-        st.caption("Triple Reconciliation: BECU vs CUNA vs Standing Orders")
+        st.caption("Triple Reconciliation: Full Audit, Portal Upload, & Discrepancy Tracking")
 except FileNotFoundError:
     st.title("FIP Recon Tool V24")
 
@@ -22,7 +22,6 @@ st.divider()
 # --- HELPER FUNCTIONS ---
 
 def load_generic_file(file):
-    """Simple loader used specifically for the Standing Order raw format."""
     if file.name.endswith('.csv'):
         try:
             return pd.read_csv(file, header=None, encoding='utf-8')
@@ -31,23 +30,15 @@ def load_generic_file(file):
     return pd.read_excel(file, header=None)
 
 def header_hunter(file):
-    """Your original working logic for Activity and CUNA files."""
-    if file.name.endswith('.csv'):
-        try:
-            df_raw = pd.read_csv(file, header=None, encoding='utf-8')
-        except UnicodeDecodeError:
-            df_raw = pd.read_csv(file, header=None, encoding='ISO-8859-1')
-    else:
-        df_raw = pd.read_excel(file, header=None)
-    
+    raw = load_generic_file(file)
     header_row_index = 0
-    for i, row in df_raw.head(50).iterrows():
+    for i, row in raw.head(50).iterrows():
         vals = [str(v).strip().lower() for v in row.values]
         if any(keyword in vals for keyword in ['acno', 'name', 'acct_nr', 'cert_num']):
             header_row_index = i
             break
             
-    df = df_raw.iloc[header_row_index:].copy()
+    df = raw.iloc[header_row_index:].copy()
     new_cols = []
     for i, col in enumerate(df.iloc[0]):
         val = str(col).strip()
@@ -60,10 +51,6 @@ def header_hunter(file):
     df = df[1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
     df = df[df.iloc[:, 0].astype(str).str.len() > 0]
-    
-    plan_col = next((c for c in df.columns if 'plan' in c.lower()), None)
-    if plan_col:
-        df = df[df[plan_col].astype(str).str.contains("Plan", case=False, na=False)]
     
     cols = pd.Series(df.columns)
     for dup in cols[cols.duplicated()].unique(): 
@@ -87,110 +74,90 @@ if act_file and cuna_file:
         df_act = header_hunter(act_file)
         df_cuna = header_hunter(cuna_file)
 
-        # 1. PRE-PROCESS NAMES (Restore your verified logic)
+        # 1. PRE-PROCESS NAMES & IDS
         name_act_col = next((c for c in df_act.columns if 'name' in c.lower() and 'extra' not in c.lower()), df_act.columns[1])
         df_act['Activity_Name'] = df_act[name_act_col].astype(str).str.upper()
 
         fname_col = next((c for c in df_cuna.columns if 'fname' in c.lower()), None)
         lname_col = next((c for c in df_cuna.columns if 'lname' in c.lower()), None)
-
         if fname_col and lname_col:
-            df_cuna['CUNA_Name'] = df_cuna[fname_col].astype(str) + " " + df_cuna[lname_col].astype(str)
-            df_cuna['CUNA_Name'] = df_cuna['CUNA_Name'].str.upper().replace('NAN', '').str.strip()
+            df_cuna['CUNA_Name'] = (df_cuna[fname_col].astype(str) + " " + df_cuna[lname_col].astype(str)).str.upper().replace('NAN', '').str.strip()
         else:
             alt_name = next((c for c in df_cuna.columns if 'name' in c.lower()), df_cuna.columns[1])
             df_cuna['CUNA_Name'] = df_cuna[alt_name].astype(str).str.upper()
 
-        # 2. IDENTIFY COLUMNS
         ac_col = next((c for c in df_act.columns if 'acno' in c.lower() or 'acct_nr' in c.lower()), df_act.columns[0])
-        best_act_col = None
-        for c in df_act.columns:
-            if pd.to_numeric(df_act[c], errors='coerce').isin(list(FIP_AMOUNTS)).any():
-                best_act_col = c
-                break
-        if not best_act_col: best_act_col = df_act.columns[-1]
-
+        best_act_col = next((c for c in df_act.columns if pd.to_numeric(df_act[c], errors='coerce').isin(list(FIP_AMOUNTS)).any()), df_act.columns[-1])
         cuna_prem_col = next((c for c in df_cuna.columns if 'curr' in c.lower() and 'prem' in c.lower()), df_cuna.columns[-1])
+        prod_col = next((c for c in df_cuna.columns if 'product' in c.lower()), None)
 
-        if st.button("🚀 Process Reconciliation"):
-            # Process Activity
+        if st.button("🚀 Run Ultimate Reconciliation"):
+            # Payments Logic (Activity)
             df_act['Numeric_Amt'] = pd.to_numeric(df_act[best_act_col], errors='coerce').fillna(0)
-            df_fip = df_act[df_act['Numeric_Amt'].isin(list(FIP_AMOUNTS))].copy()
-            df_fip['Join_ID'] = df_fip[ac_col].astype(str).str.split('.').str[0].str.lstrip('0').str.strip()
+            df_fip_payments = df_act[df_act['Numeric_Amt'].isin(list(FIP_AMOUNTS))].copy()
+            df_fip_payments['Join_ID'] = df_fip_payments[ac_col].astype(str).str.split('.').str[0].str.lstrip('0').str.strip()
+            df_fip_summary = df_fip_payments.groupby('Join_ID').agg({'Numeric_Amt': 'sum', 'Activity_Name': 'first'}).reset_index()
 
-            # Process CUNA
-            df_cuna['CUNA_Amt'] = pd.to_numeric(df_cuna[cuna_prem_col], errors='coerce').fillna(0)
+            # Master List Logic (CUNA) - Clean Total/NaN Rows
             cuna_id_col = next(c for c in df_cuna.columns if 'acct_nr' in str(c).lower())
             cert_col = next(c for c in df_cuna.columns if 'cert_num' in str(c).lower())
-            df_cuna['Join_ID'] = df_cuna[cuna_id_col].astype(str).str.split('.').str[0].str.lstrip('0').str.strip()
+            df_cuna_clean = df_cuna.dropna(subset=[cuna_id_col]).copy()
+            df_cuna_clean['Join_ID'] = df_cuna_clean[cuna_id_col].astype(str).str.split('.').str[0].str.lstrip('0').str.strip()
 
-            # --- OPTIONAL STANDING ORDER LAYER ---
-            df_so_final = pd.DataFrame()
-            if so_file:
-                # Use the newly named function defined at the top
-                raw_so = load_generic_file(so_file)
-                # Hard-mapped coordinates for Standing Orders: C(2), D(3), T(19)
-                df_so_raw = raw_so.iloc[6:].copy()
-                df_so_raw['Join_ID'] = df_so_raw[2].astype(str).str.split('.').str[0].str.lstrip('0').str.strip()
-                df_so_raw = df_so_raw[df_so_raw['Join_ID'].str.isdigit() == True]
-                
-                df_so_final['Join_ID'] = df_so_raw['Join_ID']
-                df_so_final['SO_Name'] = df_so_raw[3].astype(str).str.upper()
-                df_so_final['SO_Expected'] = pd.to_numeric(df_so_raw[19], errors='coerce').fillna(0)
+            # --- THE MASTER MERGE (Side-by-Side) ---
+            merged = pd.merge(df_cuna_clean[['Join_ID', cert_col, 'PLAN', 'CUNA_Name', cuna_prem_col, prod_col]], df_fip_summary, on='Join_ID', how='left')
+            merged['Numeric_Amt'] = merged['Numeric_Amt'].fillna(0)
 
-            # --- FINAL MERGE ---
-            merged = pd.merge(df_fip, df_cuna[['Join_ID', cert_col, 'PLAN', 'CUNA_Name']], on='Join_ID', how='left')
+            # --- DISCREPANCY DATASETS ---
+            # Queries: People who paid but are NOT on the CUNA Bill
+            df_queries = df_fip_summary[~df_fip_summary['Join_ID'].isin(df_cuna_clean['Join_ID'])].copy()
             
-            if not df_so_final.empty:
-                merged = pd.merge(merged, df_so_final, on='Join_ID', how='left')
+            # Uncollected: People on the CUNA Bill who paid $0.00
+            df_uncollected = merged[merged['Numeric_Amt'] == 0].copy()
 
             # --- UI DASHBOARD ---
-            st.subheader("📊 Financial Dashboard")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("BECU Collected", f"${df_fip['Numeric_Amt'].sum():,.2f}")
-            m2.metric("CUNA Billed", f"${df_cuna['CUNA_Amt'].sum():,.2f}")
-            if not df_so_final.empty:
-                m3.metric("SO Setup Value", f"${df_so_final['SO_Expected'].sum():,.2f}")
-            else:
-                m3.metric("Total Matches", len(df_fip))
+            st.subheader("📊 Reconciliation Overview")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("CUNA Master List", len(merged))
+            m2.metric("Total Collected", f"${merged['Numeric_Amt'].sum():,.2f}")
+            m3.metric("Queries (Investigate)", len(df_queries))
+            m4.metric("Uncollected (0.00)", len(df_uncollected))
 
-            tab1, tab2, tab3, tab4 = st.tabs(["📄 Export & Preview", "🔍 Queries (Mismatches)", "⚠️ Uncollected Premiums", "📑 Standing Order Gap"])
+            # --- TABS FOR WORKFLOW ---
+            tab1, tab2, tab3, tab4 = st.tabs(["📥 Final Downloads", "🔍 Queries (Paid/Not Billed)", "⚠️ Uncollected (Billed/Not Paid)", "📋 Audit Preview"])
             
             with tab1:
-                full_report = pd.DataFrame()
-                full_report['ACCT_NR'] = merged['Join_ID']
-                full_report['NAME'] = merged['CUNA_Name'].fillna(merged['Activity_Name'])
-                full_report['PLAN'] = merged['PLAN']
-                full_report['BECU_COLLECTED'] = merged['Numeric_Amt']
-                if 'SO_Expected' in merged.columns:
-                    full_report['SO_EXPECTED'] = merged['SO_Expected']
-                full_report['CERT_NUM'] = merged[cert_col]
-                st.dataframe(full_report, use_container_width=True)
-                
-                out_full = io.BytesIO()
-                with pd.ExcelWriter(out_full, engine='openpyxl') as writer: full_report.to_excel(writer, index=False)
-                st.download_button("📥 Download Full Recon Report", data=out_full.getvalue(), file_name="Triple_FIP_Report.xlsx")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.info("Full Side-by-Side Audit (Includes Martha/Nancy and all Non-FIP)")
+                    audit_out = merged.copy()
+                    audit_out.rename(columns={'Numeric_Amt': 'BECU_PAID', cuna_prem_col: 'CUNA_BILLED'}, inplace=True)
+                    out_audit = io.BytesIO()
+                    with pd.ExcelWriter(out_audit, engine='openpyxl') as writer: audit_out.to_excel(writer, index=False)
+                    st.download_button("📥 Download Audit File", data=out_audit.getvalue(), file_name="Full_Audit_Report.xlsx")
+
+                with col_b:
+                    st.success("Clean Portal Upload (All Billed Accounts)")
+                    portal_out = merged[['Join_ID', 'CUNA_Name', 'PLAN', 'Numeric_Amt', cert_col]].copy()
+                    portal_out.columns = ['ACCT_NR', 'NAME', 'PLAN', 'PREMIUM_PAID', 'CERT_NUM']
+                    out_portal = io.BytesIO()
+                    with pd.ExcelWriter(out_portal, engine='openpyxl') as writer: portal_out.to_excel(writer, index=False)
+                    st.download_button("📥 Download Portal File", data=out_portal.getvalue(), file_name="CUNA_Portal_Final.xlsx")
 
             with tab2:
-                mismatches = merged[merged[cert_col].isna()].copy()
-                st.warning(f"Found {len(mismatches)} members in Activity Report missing from CUNA Bill.")
-                st.dataframe(mismatches[['Join_ID', 'Activity_Name', 'Numeric_Amt']], use_container_width=True)
+                st.warning(f"Found {len(df_queries)} members who paid FIP but are missing from the CUNA Bill.")
+                st.dataframe(df_queries, use_container_width=True)
 
             with tab3:
-                ghosts = df_cuna[~df_cuna['Join_ID'].isin(df_fip['Join_ID'])].copy()
-                st.error(f"Found {len(ghosts)} members billed by CUNA with no payment found in Activity.")
-                st.dataframe(ghosts[['Join_ID', 'CUNA_Name', 'CUNA_Amt']], use_container_width=True)
-
+                st.error(f"Found {len(df_uncollected)} members billed by CUNA with $0.00 collected.")
+                st.dataframe(df_uncollected[['Join_ID', 'CUNA_Name', prod_col, cuna_prem_col]], use_container_width=True)
+            
             with tab4:
-                if not df_so_final.empty:
-                    so_gaps = df_so_final[~df_so_final['Join_ID'].isin(df_fip['Join_ID'])].copy()
-                    st.info(f"Found {len(so_gaps)} members with Standing Orders but NO payment collected this month.")
-                    st.dataframe(so_gaps, use_container_width=True)
-                else:
-                    st.info("Upload the Standing Order file to see the collection gap.")
+                st.write("Live Preview of Master Reconciliation Table")
+                st.dataframe(merged, use_container_width=True)
 
     except Exception as e:
         st.error(f"Error: {e}")
 
 st.markdown("---")
-st.caption("FIP Reconciliation Tool - Version 24.26 (Definition Patch)")
+st.caption("FIP Reconciliation Tool - Version 24.36 (Ultimate Master-Audit Edition)")
